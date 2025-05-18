@@ -1,9 +1,7 @@
-// app/Services/DocumentGenerator.ts
 import PDFDocument from 'pdfkit'
 import fs from 'node:fs'
 import app from '@adonisjs/core/services/app'
 import type DocumentRequest from '#models/document_request'
-import Validation from '#models/validation'
 import academicData from '../data/academic_references.js'
 
 export default class DocumentGenerator {
@@ -17,12 +15,19 @@ export default class DocumentGenerator {
    */
   async generate(
     request: DocumentRequest,
-    outputPath: string
+    outputPath: string,
+    signaturePath: string | null = null
   ): Promise<void> {
     this.doc = new PDFDocument({
       size: 'A4',
       margin: this.margin,
-      bufferPages: true
+      bufferPages: true,
+      info: {
+        Title: this.getDocumentTitle(request.documentType),
+        Author: request.establishment,
+        Subject: `Document for ${request.studentName}`,
+        CreationDate: new Date(),
+      }
     })
 
     // Gestion des pages multiples
@@ -40,13 +45,14 @@ export default class DocumentGenerator {
     this.addStudentInfo(request)
     this.addDocumentContent(request)
 
-    // Pied de page avec signatures
-    await this.addFooter(request)
+    // Pied de page avec signature
+    await this.addFooter(request, signaturePath)
 
     this.doc.end()
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       stream.on('finish', resolve)
+      stream.on('error', reject)
     })
   }
 
@@ -54,20 +60,20 @@ export default class DocumentGenerator {
    * En-tête avec logo et informations universitaires
    */
   private async addHeader(request: DocumentRequest) {
-    // const logoPath = app.publicPath('university_logo.png')
-    // if (fs.existsSync(logoPath)) {
-    //   this.doc.image(logoPath, this.margin, this.margin, {
-    //     width: 80,
-    //     align: 'center'
-    //   })
-    // }
+    const logoPath = app.publicPath('university_logo.jpg')
+    if (fs.existsSync(logoPath)) {
+      this.doc.image(logoPath, this.margin, this.margin, {
+        width: 80,
+        align: 'center',
+      })
+    }
 
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica-Bold')
       .fontSize(18)
-      .text(this.getDocumentTitle(request.documentType), {
+      .text(this.getDocumentTitle(request.documentType), this.margin + 100, this.margin, {
         align: 'center',
-        underline: true
+        underline: true,
       })
       .moveDown(1)
   }
@@ -77,10 +83,10 @@ export default class DocumentGenerator {
    */
   private addPageHeader(request: DocumentRequest) {
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica')
       .fontSize(10)
       .text(`${request.studentName} - ${request.matricule} - Page ${this.doc.bufferedPageRange().count}`, {
-        align: 'right'
+        align: 'right',
       })
       .moveDown(0.5)
   }
@@ -89,18 +95,22 @@ export default class DocumentGenerator {
    * Informations étudiant
    */
   private addStudentInfo(request: DocumentRequest) {
+    const studentRecord = academicData.find(record => record.matricule === request.matricule)
+
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica-Bold')
       .fontSize(12)
       .text('INFORMATIONS ÉTUDIANT', { underline: true })
       .moveDown(0.5)
 
     this.doc
-      // .font('Helvetica')
+      .font('Helvetica')
+      .fontSize(11)
       .text(`Nom complet: ${request.studentName}`)
       .text(`Matricule: ${request.matricule}`)
       .text(`Établissement: ${request.establishment}`)
-      // .text(`Filière: ${request.program || 'Non spécifié'}`)
+      .text(`Filière: ${studentRecord?.program || 'Non spécifié'}`)
+      .text(`Niveau: ${studentRecord?.level || 'Non spécifié'}`)
       .text(`Année académique: ${request.academicYear}`)
       .moveDown(1)
   }
@@ -120,7 +130,10 @@ export default class DocumentGenerator {
         this.addCertificateContent(request)
         break
       default:
-        this.doc.text('Document officiel délivré par l\'université')
+        this.doc
+          .font('Helvetica')
+          .fontSize(11)
+          .text('Document officiel délivré par l\'université')
     }
   }
 
@@ -128,20 +141,26 @@ export default class DocumentGenerator {
    * Contenu pour un diplôme
    */
   private addDiplomaContent(request: DocumentRequest) {
-    this.doc
-      // .font('Helvetica-Bold')
-      .text('DIPLÔME DÉLIVRÉ', { underline: true })
-      .moveDown(0.5)
+    const studentRecord = academicData.find(record => record.matricule === request.matricule)
 
     this.doc
-      // .font('Helvetica')
+      .font('Helvetica-Bold')
+      .fontSize(14)
+      .text('DIPLÔME DÉLIVRÉ', { align: 'center', underline: true })
+      .moveDown(1)
+
+    this.doc
+      .font('Helvetica')
+      .fontSize(12)
       .text('L\'université confère à:')
       .moveDown(0.5)
-      .text(request.studentName, { indent: 50 })
+      .text(request.studentName, { align: 'center' })
       .moveDown(1)
       .text('Le grade de:')
       .moveDown(0.5)
-      .text('Licence/Master en [Spécialité]', { indent: 50 })
+      .text(`${studentRecord?.level || 'Licence'} en ${studentRecord?.program || '[Spécialité]'}`, { align: 'center' })
+      .moveDown(1)
+      .text(`Mention: ${this.getMention(studentRecord?.overallAverage || 0)}`, { align: 'center' })
   }
 
   /**
@@ -151,32 +170,34 @@ export default class DocumentGenerator {
     const studentRecord = academicData.find(record => record.matricule === request.matricule)
 
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica-Bold')
       .fontSize(14)
       .text('ATTESTATION DE SCOLARITÉ', { align: 'center', underline: true })
       .moveDown(1.5)
 
     this.doc
-      // .font('Helvetica')
+      .font('Helvetica')
+      .fontSize(11)
       .text('Je soussigné(e), responsable de l\'établissement, certifie que :')
       .moveDown(1.5)
 
     this.doc
-      // .font('Helvetica-Bold')
-      .text(`${request.studentName}`, { align: 'center' })
+      .font('Helvetica-Bold')
+      .fontSize(12)
+      .text(request.studentName, { align: 'center' })
       .moveDown(0.5)
 
     this.doc
-      // .font('Helvetica')
-      // .text(`Né(e) le : ${request.birthDate || '--/--/----'}`)
-      .text(`De matricule : ${request.matricule}`)
+      .font('Helvetica')
+      .fontSize(11)
+      .text(`Matricule: ${request.matricule}`)
       .text(`Est régulièrement inscrit(e) dans notre établissement pour l'année académique ${request.academicYear}.`)
       .moveDown(1)
 
     if (studentRecord) {
       this.doc
-        // .text(`Filière : ${request.program || studentRecord.program || 'Non spécifié'}`)
-        .text(`Niveau : ${studentRecord?.level || 'Non spécifié'}`)
+        .text(`Filière: ${studentRecord.program || 'Non spécifié'}`)
+        .text(`Niveau: ${studentRecord.level || 'Non spécifié'}`)
         .moveDown(1)
     }
 
@@ -185,13 +206,10 @@ export default class DocumentGenerator {
       .moveDown(2)
 
     this.doc
-      .text('Fait à ................................., le .................................')
+      .font('Helvetica')
+      .fontSize(11)
+      .text(`Fait à ${request.establishment}, le ${new Date().toLocaleDateString('fr-FR')}`)
       .moveDown(2)
-
-    // Espace pour signature et cachet
-    this.doc
-      .text('Le Responsable de l\'établissement', { align: 'right' })
-      .moveDown(3)
   }
 
   /**
@@ -201,20 +219,28 @@ export default class DocumentGenerator {
     const studentRecord = academicData.find(record => record.matricule === request.matricule)
 
     if (!studentRecord) {
-      this.doc.text('Aucune donnée académique trouvée pour cet étudiant')
+      this.doc
+        .font('Helvetica')
+        .fontSize(11)
+        .text('Aucune donnée académique trouvée pour cet étudiant')
       return
     }
 
-    // Affichage par semestre
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica-Bold')
       .fontSize(14)
       .text('RELEVÉ DE NOTES OFFICIEL', { align: 'center', underline: true })
       .moveDown(1)
 
-    // Parcourir chaque semestre
-    studentRecord.academicYears.forEach((year: any) => {
-      year.semesters.forEach((semester: any) => {
+    // Parcourir chaque année académique
+    studentRecord.academicYears.forEach((year) => {
+      this.doc
+        .font('Helvetica-Bold')
+        .fontSize(12)
+        .text(`Année Académique: ${year.year}`, { underline: true })
+        .moveDown(0.5)
+
+      year.semesters.forEach((semester) => {
         this.addSemesterSection(semester.number, semester)
       })
     })
@@ -228,31 +254,32 @@ export default class DocumentGenerator {
    */
   private addSemesterSection(semester: number, semesterData: any) {
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica-Bold')
       .fontSize(12)
-      .text(`SEMESTRE ${semester}`, { underline: true })
+      .text(`Semestre ${semester}`, { underline: true })
       .moveDown(0.5)
 
     // En-têtes du tableau
-    const headers = ['Matière', 'Code', 'Crédits', 'Note']
+    const headers = ['Matière', 'Code', 'Crédits', 'Note', 'Enseignant']
     const rows = semesterData.courses.map((course: any) => [
       course.name,
       course.code,
       course.credits.toString(),
-      course.grade.toFixed(2)
+      course.grade.toFixed(2),
+      course.teacher || 'Non spécifié',
     ])
 
     // Dessiner le tableau
     this.drawTable(headers, rows)
 
-    // Moyenne du semestre
-    this.doc.moveDown(0.5)
+    // Moyenne du semestre et crédits
     this.doc
-      // .font('Helvetica-Bold')
-      .text(`Moyenne semestrielle: ${semesterData.average.toFixed(2)}`, {
-        align: 'right'
-      })
-      .moveDown(1.5)
+      .moveDown(0.5)
+      .font('Helvetica')
+      .fontSize(11)
+      .text(`Moyenne semestrielle: ${semesterData.average.toFixed(2)}`, { align: 'right' })
+      .text(`Crédits obtenus: ${semesterData.creditsEarned}`, { align: 'right' })
+      .moveDown(1)
   }
 
   /**
@@ -260,87 +287,68 @@ export default class DocumentGenerator {
    */
   private addOverallAverage(average: number) {
     this.doc
-      // .font('Helvetica-Bold')
+      .font('Helvetica-Bold')
       .fontSize(14)
       .text(`MOYENNE GÉNÉRALE: ${average.toFixed(2)}`, {
         align: 'center',
-        underline: true
+        underline: true,
       })
       .moveDown(1)
 
     // Mention selon la moyenne
-    let mention = ''
-    if (average >= 16) mention = 'EXCELLENT'
-    else if (average >= 14) mention = 'TRÈS BIEN'
-    else if (average >= 12) mention = 'BIEN'
-    else if (average >= 10) mention = 'ASSEZ BIEN'
-
+    const mention = this.getMention(average)
     if (mention) {
       this.doc
-        // .font('Helvetica-Bold')
+        .font('Helvetica-Bold')
         .fontSize(12)
         .text(`MENTION: ${mention}`, { align: 'center' })
         .moveDown(1)
     }
 
-    // Légende
     this.doc
+      .font('Helvetica')
       .fontSize(10)
       .text('* Ce relevé de notes est un document officiel délivré par l\'université', {
-        align: 'center'
+        align: 'center',
       })
   }
 
   /**
-   * Pied de page avec signatures
+   * Pied de page avec signature
    */
-  private async addFooter(request: DocumentRequest) {
-    const signatures = await Validation.query()
-      .where('request_id', request.id)
-      .whereNotNull('signature_path')
-      .preload('staff')
+  private async addFooter(request: DocumentRequest, signaturePath: string | null) {
+    this.doc.moveDown(2)
 
-    if (signatures.length > 0) {
-      this.doc.moveDown(2)
-      this.doc.text('Signatures:', { underline: true })
-
-      const signatureY = this.doc.y
-      const signatureWidth = 150
-      const spacing = (this.doc.page.width - this.margin * 2 - signatureWidth * signatures.length) / (signatures.length + 1)
-
-      signatures.forEach((validation: any, i: number) => {
-        const x = this.margin + spacing + (signatureWidth + spacing) * i
-
-        // Signature
-        // const signaturePath = app.tmpPath(validation.signaturePath)
-        // if (fs.existsSync(signaturePath)) {
-        //   this.doc.image(signaturePath, x, signatureY, {
-        //     width: 100,
-        //     height: 50
-        //   })
-        // }
-
-        // Info validateur
+    if (signaturePath) {
+      const fullPath = app.tmpPath(signaturePath)
+      if (fs.existsSync(fullPath)) {
+        this.doc.image(fullPath, this.margin, this.doc.y, {
+          width: 100,
+          height: 50,
+        })
         this.doc
+          .font('Helvetica')
           .fontSize(10)
-          .text(validation.staff.fullName, x, signatureY + 60, {
-            width: signatureWidth,
-            align: 'center'
+          .text('Signature du Responsable', this.margin, this.doc.y + 55, {
+            width: 100,
+            align: 'center',
           })
-          .text(`(${validation.step})`, x, signatureY + 75, {
-            width: signatureWidth,
-            align: 'center'
-          })
+      }
+    }
+
+    const sealPath = app.publicPath('university_logo.jpg')
+    if (fs.existsSync(sealPath)) {
+      this.doc.image(sealPath, this.doc.page.width - 120, this.doc.page.height - 120, {
+        width: 80,
       })
     }
 
-    // Cachet universitaire
-    // const sealPath = app.publicPath('university_seal.png')
-    // if (fs.existsSync(sealPath)) {
-    //   this.doc.image(sealPath, this.doc.page.width - 120, this.doc.page.height - 120, {
-    //     width: 80
-    //   })
-    // }
+    this.doc
+      .font('Helvetica')
+      .fontSize(10)
+      .text(`Document généré pour ${request.studentName} (${request.trackingId})`, {
+        align: 'center',
+      })
   }
 
   /**
@@ -357,11 +365,12 @@ export default class DocumentGenerator {
         .fillAndStroke('#f0f0f0', '#000')
 
       this.doc
-        // .font('Helvetica-Bold')
+        .font('Helvetica-Bold')
         .fillColor('#000')
-        .text(header, this.margin + columnWidth * i + 5, startY + 5, {
+        .fontSize(10)
+        .text(header, this.margin + columnWidth * i + 5, startY + 7, {
           width: columnWidth - 10,
-          align: 'left'
+          align: 'left',
         })
     })
 
@@ -376,11 +385,12 @@ export default class DocumentGenerator {
           .fillAndStroke(bgColor, '#000')
 
         this.doc
-          // .font('Helvetica')
+          .font('Helvetica')
           .fillColor('#000')
-          .text(cell, this.margin + columnWidth * colIndex + 5, y + 5, {
+          .fontSize(10)
+          .text(cell, this.margin + columnWidth * colIndex + 5, y + 7, {
             width: columnWidth - 10,
-            align: colIndex === 3 ? 'right' : 'left'
+            align: colIndex === 3 ? 'right' : 'left',
           })
       })
     })
@@ -394,9 +404,20 @@ export default class DocumentGenerator {
   private getDocumentTitle(type: string): string {
     const titles: Record<string, string> = {
       diploma: 'COPIE CONFORME DE DIPLÔME',
-      transcript: 'RELEVÉ DE NOTES OFFICIEL',
-      certificate: 'ATTESTATION DE SCOLARITÉ'
+      bulletin: 'RELEVÉ DE NOTES OFFICIEL',
+      certificate: 'ATTESTATION DE SCOLARITÉ',
     }
     return titles[type] || 'DOCUMENT UNIVERSITAIRE'
+  }
+
+  /**
+   * Détermine la mention selon la moyenne
+   */
+  private getMention(average: number): string {
+    if (average >= 16) return 'EXCELLENT'
+    if (average >= 14) return 'TRÈS BIEN'
+    if (average >= 12) return 'BIEN'
+    if (average >= 10) return 'ASSEZ BIEN'
+    return ''
   }
 }

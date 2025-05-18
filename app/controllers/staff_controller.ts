@@ -7,6 +7,7 @@ import Validation from '#models/validation'
 import Document from '#models/document'
 import User from '#models/user'
 import Payment from '#models/payment'
+import mail from '@adonisjs/mail/services/main'
 
 export default class StaffController {
   /**
@@ -70,7 +71,7 @@ export default class StaffController {
 
     const documentRequest = await DocumentRequest.findOrFail(id)
     
-    if (!user.canValidate(documentRequest.status)) {
+    if (user.role !== "admin" && user.role !== "validator1") {
       return response.forbidden({ 
         error: 'Action non autorisée pour votre rôle' 
       })
@@ -112,11 +113,44 @@ export default class StaffController {
   /**
    * Génère le document PDF
    */
-  async generate({ auth, params, response }: HttpContext) {
+  // async generate({ auth, params, response }: HttpContext) {
+  //   const user = await auth.authenticate()
+  //   const { id } = params
+
+  //   const request = await DocumentRequest.query()
+  //     .where('id', id)
+  //     .where('status', 'approved')
+  //     .firstOrFail()
+
+  //   const exists = await Document.query()
+  //     .where('request_id', id)
+  //     .first()
+
+  //   if (exists) {
+  //     return response.conflict({ 
+  //       error: 'Document déjà généré' 
+  //     })
+  //   }
+
+  //   const fileName = `${request.trackingId}_${cuid()}.pdf`
+  //   const filePath = app.tmpPath('documents', fileName)
+
+  //   await new DocumentGenerator().generate(request, filePath)
+
+  //   const document = await Document.create({
+  //     requestId: request.id,
+  //     type: request.documentType,
+  //     filePath: `documents/${fileName}`,
+  //     generatedBy: user.id
+  //   })
+
+  //   return response.created(document)
+  // }
+  async generate({ auth, params, request, response }: HttpContext) {
     const user = await auth.authenticate()
     const { id } = params
 
-    const request = await DocumentRequest.query()
+    const documentRequest = await DocumentRequest.query()
       .where('id', id)
       .where('status', 'approved')
       .firstOrFail()
@@ -131,16 +165,38 @@ export default class StaffController {
       })
     }
 
-    const fileName = `${request.trackingId}_${cuid()}.pdf`
+    const signatureFile = request.file('signature')
+    let signaturePath: string | null = null
+    if (signatureFile) {
+      signaturePath = await this.storeSignature(signatureFile as unknown as File)
+    }
+
+    const fileName = `${documentRequest.trackingId}_${cuid()}.pdf`
     const filePath = app.tmpPath('documents', fileName)
 
-    await new DocumentGenerator().generate(request, filePath)
+    await new DocumentGenerator().generate(documentRequest, filePath, signaturePath)
 
     const document = await Document.create({
-      requestId: request.id,
-      type: request.documentType,
+      requestId: documentRequest.id,
+      type: documentRequest.documentType,
       filePath: `documents/${fileName}`,
-      generatedBy: user.id
+      generatedBy: user.id,
+    })
+
+    // Send email to student
+    await mail.send(message => {
+      message.to(documentRequest.studentEmail)
+      message.subject(`Votre document ${documentRequest.documentType} est prêt`)
+      message.html(`
+        <p>Cher(e) ${documentRequest.studentName},</p>
+        <p>Votre document (${documentRequest.documentType}) a été généré avec succès.</p>
+        <p>Vous trouverez le document en pièce jointe.</p>
+        <p>Cordialement,<br>L'équipe administrative</p>
+      `)
+      message.hasAttachment(
+        filePath,
+        // `${documentRequest.documentType}_${documentRequest.trackingId}.pdf`,
+      )
     })
 
     return response.created(document)
@@ -217,7 +273,7 @@ export default class StaffController {
     if (!approved) return 'rejected'
 
     switch(role) {
-      case 'validator1': return 'pending_validation2'
+      case 'validator1': return 'pending_validator2'
       case 'validator2': 
         return docType === 'diploma' 
           ? 'pending_validation3' 

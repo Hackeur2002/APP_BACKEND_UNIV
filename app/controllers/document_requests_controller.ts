@@ -4,6 +4,7 @@ import AcademicValidator from '#services/academic_validator'
 import PaymentProcessor from '#services/payment_processor'
 import files_uploads_services from '#services/files_uploads_services'
 import { createDocumentRequestValidator } from '#validators/document_request'
+import Payment from '#models/payment'
 
 export default class DocumentRequestsController {
   /**
@@ -64,7 +65,7 @@ export default class DocumentRequestsController {
         studentEmail: data.studentEmail,
         studentPhone: data.studentPhone,
         trackingId: `DOC-${Date.now().toString(36).toUpperCase()}`,
-        status: 'payment_pending',
+        status: 'pending_validator1',
         acteNaissancePath: filePaths.acteNaissance,
         carteEtudiantPath: filePaths.carteEtudiant,
         fichePreinscriptionPath: filePaths.fichePreinscription,
@@ -72,15 +73,22 @@ export default class DocumentRequestsController {
         demandeManuscritePath: filePaths.demandeManuscrite
       })
 
-      const { payment, paymentUrl } = await paymentProcessor.initiatePayment(
-        documentRequest,
-        data.paymentMethod
-      )
+      // const { payment, paymentUrl } = await paymentProcessor.initiatePayment(
+      //   documentRequest,
+      //   data.paymentMethod
+      // )
+
+      const payment = await Payment.create({
+        requestId: documentRequest.id,
+        reference: data.paymentReference,
+        amount: parseInt(data.documentPrice),
+        method: data.paymentMethod as 'card' | 'mobile_money' | 'bank_transfer' | 'cash' ?? 'mobile_money',
+        status: 'completed'
+      })
 
       return response.created({
         trackingId: documentRequest.trackingId,
         paymentStatus: payment.status,
-        paymentUrl
       })
     } catch (error) {
       return response.badRequest({

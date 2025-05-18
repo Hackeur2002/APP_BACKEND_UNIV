@@ -10,6 +10,8 @@ export const createDocumentRequestValidator = vine.compile(
         studentEmail: vine.string().minLength(2),
         studentPhone: vine.string().minLength(2),
         paymentMethod: vine.string().minLength(2),
+        documentPrice: vine.string(),
+        paymentReference: vine.string().minLength(2),
         acteNaissance: vine.file({
             size: '2mb', // Taille maximale de 2 Mo
             extnames: ['jpg', 'JPG', 'png', 'jpeg', 'webp', 'pdf', 'PDF'], // Formats acceptés

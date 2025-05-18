@@ -35,6 +35,7 @@ router.group(() => {
   // Demandes
   router.get('/requests', [StaffController, 'index'])
   router.get('/requests/:id', [StaffController, 'show'])
+  router.post('/requests/validate/:id', [StaffController, 'validate'])
   router.put('/requests/:id/status', [StaffController, 'updateStatus'])
   router.delete('/requests/:id', [StaffController, 'cancel'])
 
