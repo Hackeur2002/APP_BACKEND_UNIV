@@ -14,6 +14,8 @@ import PaymentsController from '#controllers/payments_controller'
 import StaffController from '#controllers/staff_controller'
 import GetFilesController from '#controllers/get_files_controller'
 import AuthController from '#controllers/auth_controller'
+import StudentController from '#controllers/students_controller'
+import EmailsController from '#controllers/emails_controller'
 // Public routes
 router.group(() => {
   router.post('/requests', [DocumentRequestsController, 'store'])
@@ -21,6 +23,11 @@ router.group(() => {
   router.post('/payments/:reference/callback', [PaymentsController, 'callback'])
   router.get('/payments/:reference/status', [PaymentsController, 'checkPaymentStatus'])
   router.get('uploads/*', [GetFilesController, 'getFile'])
+  router.get('tmp/*', [GetFilesController, 'getFileFromTmp'])
+
+  router.post('/students/verify', [StudentController, 'verify'])
+
+  router.post('/emails/send', [EmailsController, 'sendRecap'])
 
   // Authentication routes
   router.post('/register', [AuthController, 'register'])
@@ -38,6 +45,7 @@ router.group(() => {
   router.post('/requests/validate/:id', [StaffController, 'validate'])
   router.put('/requests/:id/status', [StaffController, 'updateStatus'])
   router.delete('/requests/:id', [StaffController, 'cancel'])
+  router.post('/requests/:id/email', [StaffController, 'sendCustomEmail'])
 
   // Validation
   router.post('/requests/:id/validate', [StaffController, 'validate'])

@@ -8,6 +8,7 @@ import Document from '#models/document'
 import User from '#models/user'
 import Payment from '#models/payment'
 import mail from '@adonisjs/mail/services/main'
+import fs from 'node:fs'
 
 export default class StaffController {
   /**
@@ -15,14 +16,32 @@ export default class StaffController {
    */
   async index({ auth, response }: HttpContext) {
     const user = await auth.authenticate()
-    
+
     const query = DocumentRequest.query()
       .preload('payment')
       .preload('documents')
       .preload('validations', (q) => q.preload('staff'))
 
-    if (user.role !== 'admin') {
-      query.where('status', `pending_${user.role}`)
+    // Filtrage selon le rôle de l'utilisateur
+    switch (user.role) {
+      case 'admin':
+        // Les admins voient tout - pas de filtre supplémentaire
+        break
+
+      case 'validator2':
+        // Validator2 voit les demandes approuvées (status = 'pending_validator2')
+        query.where('status', 'pending_validator2').orWhere('status', 'generated').orWhere('status', 'approved')
+        break
+
+      case 'validator3':
+        // Validator3 voit les demandes approuvées ET de type 'diploma'
+        query.where('status', 'pending_validator3')
+          .where('document_type', 'diploma')
+        break
+
+      default:
+        // Pour tous les autres rôles (validator1, etc.), voir seulement les demandes en attente
+        query.where('status', `pending_${user.role}`).orWhere('status', 'generated').orWhere('status', 'rejected')
     }
 
     const requests = await query.orderBy('created_at', 'desc')
@@ -66,140 +85,183 @@ export default class StaffController {
    * Valide ou rejette une demande
    */
   async validate({ auth, params, request, response }: HttpContext) {
-    const user = await auth.authenticate()
-    const { id } = params
+    try {
+      const user = await auth.authenticate()
+      const { id } = params
 
-    const documentRequest = await DocumentRequest.findOrFail(id)
-    
-    if (user.role !== "admin" && user.role !== "validator1") {
-      return response.forbidden({ 
-        error: 'Action non autorisée pour votre rôle' 
+      // Récupérer uniquement les champs nécessaires
+      const { approved, comments } = request.only(['approved', 'comments'])
+
+      const documentRequest = await DocumentRequest.findOrFail(id)
+
+      // Création de l'entrée de validation
+      const validation = await Validation.create({
+        requestId: Number(id),
+        staffId: Number(user.id),
+        step: user.role as 'validator1' | 'validator2' | 'validator3' | 'admin',
+        approved,
+        comments,
+      })
+
+      // Mise à jour de rejection_reason pour un rejet
+      if (!approved) {
+        const rejectionEntry = {
+          role: user.role,
+          email: user.email,
+          reason: comments || 'Aucune raison spécifiée',
+        }
+
+        let rejectionReasons = []
+        if (documentRequest.rejectionReason) {
+          try {
+            rejectionReasons = JSON.parse(documentRequest.rejectionReason)
+            if (!Array.isArray(rejectionReasons)) {
+              rejectionReasons = [rejectionReasons]
+            }
+          } catch (error) {
+            rejectionReasons = []
+          }
+        }
+        rejectionReasons.push(rejectionEntry)
+        documentRequest.rejectionReason = JSON.stringify(rejectionReasons)
+
+        documentRequest.status = user.role === 'validator2' ? 'pending_validator1' : 'rejected'
+        await this.sendRejectionEmail(documentRequest, comments, user.role === 'validator2')
+      } else if (user.role === 'admin' && documentRequest.status === 'pending_validator1') {
+        documentRequest.status = 'pending_validator2'
+      } else if (user.role === 'admin' && documentRequest.status === 'pending_validator2') {
+        documentRequest.status = 'approved'
+      } else {
+        documentRequest.status = this.getNextStatus(user.role, approved, documentRequest.documentType)
+      }
+
+      await documentRequest.save()
+
+      return response.ok({
+        validation: validation.serialize(),
+        request: documentRequest.serialize(),
+      })
+    } catch (error) {
+      console.error('Erreur lors de la validation:', error)
+      return response.status(500).json({
+        error: 'Erreur lors de la validation de la demande',
+        details: error.message,
       })
     }
+  }
 
-    const { approved, comments } = request.only(['approved', 'comments'])
-    const signatureFile = request.file('signature')
+  /**
+   * Envoyer un email personnalisé à l'étudiant
+   */
+  async sendCustomEmail({ params, request, response }: HttpContext) {
+    try {
+      const { id } = params
+      const { subject, message } = request.only(['subject', 'message'])
 
-    const validation = await Validation.create({
-      requestId: id,
-      staffId: user.id,
-      step: user.role.replace('validator', 'validation') as 'validation1' | 'validation2' | 'validation3',
-      approved,
-      comments,
-      ...(signatureFile && {
-        signaturePath: await this.storeSignature(signatureFile as unknown as File)
+      const documentRequest = await DocumentRequest.findOrFail(id)
+
+      // Vérifier que la demande n'a pas le statut 'generated'
+      if (documentRequest.status === 'generated') {
+        return response.badRequest({ error: 'Impossible d\'envoyer un email pour une demande avec le statut "generated"' })
+      }
+
+      // Envoyer l'email
+      await mail.send((msg) => {
+        msg
+          .to(documentRequest.studentEmail)
+          .subject(subject)
+          .html(`
+            <p>Cher(e) ${documentRequest.studentName},</p>
+            <p>${message}</p>
+            <p>Cordialement,<br>L'équipe administrative</p>
+          `)
       })
-    })
 
-    documentRequest.status = this.getNextStatus(
-      user.role,
-      approved,
-      documentRequest.documentType
-    )
-
-    if (!approved) {
-      documentRequest.rejectionReason = comments
-      documentRequest.status = 'rejected'
+      return response.ok({ message: 'Email envoyé avec succès' })
+    } catch (error) {
+      console.error('Erreur lors de l\'envoi de l\'email:', error)
+      return response.status(500).json({
+        error: 'Erreur lors de l\'envoi de l\'email',
+        details: error.message,
+      })
     }
-
-    await documentRequest.save()
-
-    return response.ok({
-      validation: validation.serialize(),
-      request: documentRequest.serialize()
-    })
   }
 
   /**
    * Génère le document PDF
    */
-  // async generate({ auth, params, response }: HttpContext) {
-  //   const user = await auth.authenticate()
-  //   const { id } = params
-
-  //   const request = await DocumentRequest.query()
-  //     .where('id', id)
-  //     .where('status', 'approved')
-  //     .firstOrFail()
-
-  //   const exists = await Document.query()
-  //     .where('request_id', id)
-  //     .first()
-
-  //   if (exists) {
-  //     return response.conflict({ 
-  //       error: 'Document déjà généré' 
-  //     })
-  //   }
-
-  //   const fileName = `${request.trackingId}_${cuid()}.pdf`
-  //   const filePath = app.tmpPath('documents', fileName)
-
-  //   await new DocumentGenerator().generate(request, filePath)
-
-  //   const document = await Document.create({
-  //     requestId: request.id,
-  //     type: request.documentType,
-  //     filePath: `documents/${fileName}`,
-  //     generatedBy: user.id
-  //   })
-
-  //   return response.created(document)
-  // }
   async generate({ auth, params, request, response }: HttpContext) {
-    const user = await auth.authenticate()
-    const { id } = params
+    try {
+      const user = await auth.authenticate()
+      const { id } = params
 
-    const documentRequest = await DocumentRequest.query()
-      .where('id', id)
-      .where('status', 'approved')
-      .firstOrFail()
+      // Vérification de la demande
+      const documentRequest = await DocumentRequest.query()
+        .where('id', id)
+        .where('status', 'pending_validator2')
+        .firstOrFail()
 
-    const exists = await Document.query()
-      .where('request_id', id)
-      .first()
+      // Vérification si document déjà généré
+      const exists = await Document.query()
+        .where('request_id', id)
+        .first()
+      if (exists) {
+        return response.conflict({ error: 'Document déjà généré' })
+      }
 
-    if (exists) {
-      return response.conflict({ 
-        error: 'Document déjà généré' 
+      // Gestion de la signature
+      const signatureFile = request.file('signature', {
+        size: '2mb',
+        extnames: ['jpg', 'png', 'jpeg', 'pdf'],
+      })
+      let signaturePath: string | null = null
+      if (signatureFile) {
+        signaturePath = await this.storeSignature(signatureFile)
+      }
+
+      // Génération du document
+      const fileName = `${documentRequest.trackingId}_${cuid()}.pdf`
+      const filePath = app.tmpPath('documents', fileName)
+
+      // Création du répertoire si inexistant
+      await fs.promises.mkdir(app.tmpPath('documents'), { recursive: true })
+
+      // Génération du PDF
+      await new DocumentGenerator().generate(documentRequest, filePath, signaturePath)
+
+      // Vérification que le fichier existe
+      await fs.promises.access(filePath, fs.constants.F_OK)
+
+      // Enregistrement en base
+      const document = await Document.create({
+        requestId: documentRequest.id,
+        type: documentRequest.documentType,
+        filePath: `documents/${fileName}`,
+        generatedBy: user.id,
+      })
+
+      // Mise à jour du statut de la demande
+      documentRequest.status = 'generated'
+      await documentRequest.save()
+
+      // Envoi de l'email
+      try {
+        await this.sendDocumentEmail(documentRequest, filePath)
+      } catch (emailError) {
+        console.error("Erreur lors de l'envoi de l'email:", emailError)
+      }
+
+      return response.created({
+        ...document.serialize(),
+        documentPath: `documents/${fileName}`,
+      })
+    } catch (error) {
+      console.error('Erreur lors de la génération:', error)
+      return response.status(500).json({
+        error: 'Erreur lors de la génération du document',
+        details: error.message,
       })
     }
-
-    const signatureFile = request.file('signature')
-    let signaturePath: string | null = null
-    if (signatureFile) {
-      signaturePath = await this.storeSignature(signatureFile as unknown as File)
-    }
-
-    const fileName = `${documentRequest.trackingId}_${cuid()}.pdf`
-    const filePath = app.tmpPath('documents', fileName)
-
-    await new DocumentGenerator().generate(documentRequest, filePath, signaturePath)
-
-    const document = await Document.create({
-      requestId: documentRequest.id,
-      type: documentRequest.documentType,
-      filePath: `documents/${fileName}`,
-      generatedBy: user.id,
-    })
-
-    // Send email to student
-    await mail.send(message => {
-      message.to(documentRequest.studentEmail)
-      message.subject(`Votre document ${documentRequest.documentType} est prêt`)
-      message.html(`
-        <p>Cher(e) ${documentRequest.studentName},</p>
-        <p>Votre document (${documentRequest.documentType}) a été généré avec succès.</p>
-        <p>Vous trouverez le document en pièce jointe.</p>
-        <p>Cordialement,<br>L'équipe administrative</p>
-      `)
-      message.hasAttachment(
-        filePath,
-        // `${documentRequest.documentType}_${documentRequest.trackingId}.pdf`,
-      )
-    })
-
-    return response.created(document)
   }
 
   /**
@@ -255,31 +317,77 @@ export default class StaffController {
           .count('* as total'),
         failed: await Payment.query()
           .where('status', 'failed')
-          .count('* as total')
-      }
+          .count('* as total'),
+      },
     }
 
     return response.ok(metrics)
   }
 
   // Méthodes privées
-  private async storeSignature(file: File) {
+  private async storeSignature(file: any): Promise<string> {
     const fileName = `${cuid()}.${file.extname}`
-    await file.move(app.tmpPath('signatures'), { name: fileName })
+    const signaturesDir = app.tmpPath('signatures')
+
+    // Création du répertoire si inexistant
+    await fs.promises.mkdir(signaturesDir, { recursive: true })
+
+    await file.move(signaturesDir, {
+      name: fileName,
+      overwrite: true,
+    })
+
+    if (!file.filePath) {
+      throw new Error('Échec du stockage de la signature')
+    }
+
     return `signatures/${fileName}`
+  }
+
+  private async sendDocumentEmail(documentRequest: DocumentRequest, filePath: string) {
+    await mail.send((message) => {
+      message
+        .to(documentRequest.studentEmail)
+        .subject(`Votre document ${documentRequest.documentType} est prêt`)
+        .html(`
+          <p>Cher(e) ${documentRequest.studentName},</p>
+          <p>Votre document (${documentRequest.documentType}) a été généré avec succès.</p>
+          <p>Vous trouverez le document en pièce jointe.</p>
+          <p>Cordialement,<br>L'équipe administrative</p>
+        `)
+        .attach(filePath, {
+          filename: `${documentRequest.documentType}_${documentRequest.trackingId}.pdf`,
+        })
+    })
+  }
+
+  private async sendRejectionEmail(documentRequest: DocumentRequest, comments: string | null, isReverted: boolean = false) {
+    await mail.send((message) => {
+      message
+        .to(documentRequest.studentEmail)
+        .subject(isReverted ? `Demande ${documentRequest.trackingId} renvoyée pour révision` : `Rejet de votre demande ${documentRequest.trackingId}`)
+        .html(`
+          <p>Cher(e) ${documentRequest.studentName},</p>
+          <p>Votre demande de document (${documentRequest.documentType}) avec l'ID de suivi ${documentRequest.trackingId} ${isReverted ? 'a été renvoyée pour révision' : 'a été rejetée'}.</p>
+          <p><strong>Raison :</strong> ${comments || 'Aucune raison spécifiée'}</p>
+          <p>${isReverted ? 'Veuillez vérifier les informations et documents fournis, puis soumettre à nouveau.' : 'Veuillez soumettre une nouvelle demande si nécessaire.'}</p>
+          <p>Cordialement,<br>L'équipe administrative</p>
+        `)
+    })
   }
 
   private getNextStatus(role: string, approved: boolean, docType: string): string {
     if (!approved) return 'rejected'
 
-    switch(role) {
-      case 'validator1': return 'pending_validator2'
-      case 'validator2': 
-        return docType === 'diploma' 
-          ? 'pending_validation3' 
-          : 'approved'
-      case 'validator3': return 'approved'
-      default: return 'rejected'
+    switch (role) {
+      case 'validator1':
+        return 'pending_validator2'
+      case 'validator2':
+        return docType === 'diploma' ? 'pending_validator3' : 'approved'
+      case 'validator3':
+        return 'approved'
+      default:
+        return 'rejected'
     }
   }
 }

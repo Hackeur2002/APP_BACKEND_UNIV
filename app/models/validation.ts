@@ -15,7 +15,7 @@ export default class Validation extends BaseModel {
   declare staffId: number
 
   @column()
-  declare step: 'validation1' | 'validation2' | 'validation3'
+  declare step: 'validator1' | 'validator2' | 'validator3' | 'admin'
 
   @column()
   declare approved: boolean
